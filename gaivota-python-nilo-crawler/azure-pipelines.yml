@@ -1,0 +1,41 @@
+trigger: none
+pr: none
+
+variables: 
+- group: crawler-var-group
+
+parameters:
+  - name: envName
+    type: string
+    displayName: Environment to deploy
+    default: 'test'
+    values:
+    - test
+    - develop
+    - staging
+    - production
+
+resources:
+  repositories:
+    - repository: templates
+      type: github
+      name: gaivota-ai/gaivota-azure-pipelines-crawlers
+      endpoint: crawler-gh-connection
+      ref: refs/tags/1.1.0
+  
+extends:
+  template: 'templates/build-and-deploy.yml@templates'
+  parameters:  
+    appName: ${{ replace(variables['Build.Repository.Name'], 'gaivota-ai/', '') }} 
+    branchName: $(Build.SourceBranchName)
+    githubManifestName: ${{ replace(variables['Build.Repository.Name'], 'gaivota-ai/gaivota-python', 'gaivota-manifest') }}
+    manifestBranch: $(manifestBranch)
+    codeArtifactDomain: $(codeArtifactDomain)
+    codeartifactCredentials: $(codeartifactCredentials)
+    ecrCredentials: $(ecrCredentials)
+    buildId: $(Build.BuildId)
+    awsRegion: $(awsRegion)
+    githubToken: $(githubToken)
+    envName: ${{ parameters.envName }}
+    baseImageRepoName: 'gaivota-python-crawler-driver'
+    baseImageRepoTag: 'v3.7.0'

@@ -1,0 +1,32 @@
+version: "2.4"
+services:
+  dev:
+    tty: true
+    stdin_open: true
+    entrypoint: "bash"
+    image: gaivota_python_nilo_crawler:latest
+    build:
+        context: .
+        dockerfile: Dockerfile
+        target: stage_dev
+    environment:
+        - POSTGIS_USER=gaivota_crawler_layers
+        - POSTGIS_PASS=pass
+        - POSTGIS_DB=postgres
+        - POSTGIS_HOST=database
+        - AWS_ACCESS_KEY_ID
+        - AWS_SECRET_ACCESS_KEY
+        - AWS_DEFAULT_REGION
+    ports:
+      - "5000:5000"
+    volumes:
+    - "./gaivota_python_nilo_crawler:/app/gaivota_python_nilo_crawler"
+    - "./tests:/app/tests"
+
+  database:
+    image: postgis/postgis:11-3.1-alpine
+    environment:
+        POSTGRES_USER: postgres
+        POSTGRES_PASSWORD: pass
+    ports:
+    -   "2345:5432"

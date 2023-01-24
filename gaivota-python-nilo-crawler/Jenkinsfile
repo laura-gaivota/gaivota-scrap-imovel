@@ -1,0 +1,230 @@
+pipeline {
+    agent any
+    options {
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '20'))
+    }
+    parameters {
+        booleanParam(name: 'PRODUCTION_READY', defaultValue: false, description: 'Production Ready?')
+        booleanParam(name: 'TEST_READY', defaultValue: false, description: 'Test Ready?')
+    }
+    stages {
+        stage('Configuration') {
+            steps {
+                script {
+                    APP_NAME = sh(script: "echo $env.JOB_NAME | cut -d '/' -f2", returnStdout: true).trim()
+                    print APP_NAME
+                    MANIFEST_NAME = sh (script: "echo $APP_NAME | cut -d '-' -f2-", returnStdout: true).trim()
+                    print MANIFEST_NAME
+                    //ENV_NAME
+                    // Setting env variables to test environment
+                    ENV_NAME       = 'test'
+                    ENV_URL        = '-' + ENV_NAME
+                    ENV_TAG        = ENV_NAME
+                    if ( params.TEST_READY == false && env.BRANCH_NAME == 'develop' ) {
+                        // Setting env variables to develop
+                        ENV_NAME       = 'develop'
+                        ENV_URL        = '-' + ENV_NAME
+                        ENV_TAG        = ENV_NAME
+                    } else if ( params.TEST_READY == true && env.BRANCH_NAME.contains('develop')) {
+                        // Setting env variables to test environment
+                        ENV_NAME       = 'test'
+                        ENV_URL        = '-' + ENV_NAME
+                        ENV_TAG        = ENV_NAME
+                    } else if (params.PRODUCTION_READY == false && env.BRANCH_NAME.contains('release/') ) {
+                        // Setting env variables to staging environment
+                        ENV_NAME       = 'staging'
+                        ENV_TAG        = 'staging'
+                    } else if ( env.BRANCH_NAME == 'main' || params.PRODUCTION_READY == true && env.BRANCH_NAME.contains('release/')) {
+                        // Setting env variables to production environment
+                        ENV_NAME = 'production'
+                        ENV_URL  = ''
+                        ENV_TAG  = 'latest'
+                    }
+                    print ENV_URL
+                    print ENV_NAME
+                    //BRANCH
+                    if ( env.BRANCH_NAME == 'develop' ) {
+                        BRANCH = 'develop'
+                    } else if(env.BRANCH_NAME.contains('hotfix/') || env.BRANCH_NAME.contains('feature/') || env.BRANCH_NAME.contains('bugfix/') || env.BRANCH_NAME.contains('PR')) {
+                        BRANCH = env.BRANCH_NAME.replace('/', '-')
+                    } else if ( params.TEST_READY == true ) {
+                        BRANCH = env.BRANCH_NAME.replace('/', '-').concat("-test-build-${env.BUILD_NUMBER}")
+                    } else if (params.PRODUCTION_READY == false && env.BRANCH_NAME.contains('release/') ) {
+                        BRANCH = env.BRANCH_NAME.replace('release/', '').concat("-RC-${env.BUILD_NUMBER}")
+                    } else if (params.PRODUCTION_READY == true && env.BRANCH_NAME.contains('release/')) {
+                        BRANCH = env.BRANCH_NAME.replace('release/', '')
+                    } else if (env.BRANCH_NAME.contains('main')) {
+                        BRANCH = 'main'
+                    }
+                    print BRANCH
+                    //K_CLUSTER
+                    if(  ENV_NAME == "production" || ENV_NAME == "staging") {
+                        K_CLUSTER = "https://kubernetes.default.svc"
+                    } else {
+                        K_CLUSTER = "https://B09E25BE73A084AAE64A6C5632CEF9BF.gr7.us-east-1.eks.amazonaws.com"
+                    }
+                    print K_CLUSTER
+                }
+                sh "sed -i 's/<BRANCH>/$BRANCH/g' sonar-project.properties"
+            }
+            post {
+                always {
+                    slackSend color: "good", message: "Job: #${env.BUILD_NUMBER} - $APP_NAME - ${env.BRANCH_NAME} - Started - Link ${env.BUILD_URL}console"
+                    slackSend color: "warning", message: "Job: #${env.BUILD_NUMBER} - $APP_NAME - ${env.BRANCH_NAME} - Configuration"
+                }
+            }
+        }
+        stage('Build') {
+            steps {
+                sh """
+                    echo 'building...'
+                """
+            }
+            post {
+                always {
+                    slackSend color: "warning", message: "Job: #${env.BUILD_NUMBER} - $APP_NAME - ${env.BRANCH_NAME} - Build"
+                }
+            }
+        }
+        stage('Test') {
+            when {
+                anyOf {
+                    branch 'feature/*';
+                    branch 'bugfix/*';
+                    branch 'hotfix/*'
+                }
+            }
+            steps {
+                sh """
+                    echo 'testing...'
+                """
+            }
+            post {
+                always {
+                    slackSend color: "warning", message: "Job: #${env.BUILD_NUMBER} - $APP_NAME - ${env.BRANCH_NAME} - Test"
+                }
+            }
+        }
+        stage('Code Analysis') {
+            when {
+                anyOf {
+                    branch 'feature/*';
+                    branch 'bugfix/*';
+                    branch 'hotfix/*'
+                }
+            }
+            environment {
+                scannerHome = tool 'sonar'
+            }
+            steps {
+                withSonarQubeEnv('sonarqube') {
+                    sh "${scannerHome}/bin/sonar-scanner"
+                }
+            }
+            post {
+                always {
+                    slackSend color: "warning", message: "Job: #${env.BUILD_NUMBER} - $APP_NAME - ${env.BRANCH_NAME} - Code Analysis"
+                }
+            }
+        }
+        stage('Docker Build') {
+            steps {
+                sh """
+                    \$(aws ecr get-login --no-include-email --region us-east-1)
+                """
+                script {
+                    if (params.PRODUCTION_READY == true && env.BRANCH_NAME.contains('release/')) {
+                        sh """
+                            docker pull 595352645034.dkr.ecr.us-east-1.amazonaws.com/$APP_NAME:latest
+                            docker tag  595352645034.dkr.ecr.us-east-1.amazonaws.com/$APP_NAME:latest 595352645034.dkr.ecr.us-east-1.amazonaws.com/$APP_NAME:stable
+                            docker push 595352645034.dkr.ecr.us-east-1.amazonaws.com/$APP_NAME:stable
+                        """
+                    }
+                }
+                sh """
+                    docker pull 595352645034.dkr.ecr.us-east-1.amazonaws.com/$APP_NAME:$ENV_TAG || true
+                    docker build -t $APP_NAME . --cache-from 595352645034.dkr.ecr.us-east-1.amazonaws.com/$APP_NAME:$ENV_TAG
+                    docker tag $APP_NAME:latest 595352645034.dkr.ecr.us-east-1.amazonaws.com/$APP_NAME:$ENV_TAG
+                    docker push 595352645034.dkr.ecr.us-east-1.amazonaws.com/$APP_NAME:$ENV_TAG
+                """
+            }
+            post {
+                always {
+                    slackSend color: "warning", message: "Job: #${env.BUILD_NUMBER} - $APP_NAME - ${env.BRANCH_NAME} - Docker Build"
+                }
+            }
+        }
+        stage('Generate Manifest') {
+            steps {
+                sh 'git config --global credential.helper cache'
+                sh 'git config --global push.default simple'
+                sh 'git config user.email "devops@gaivota.ai"'
+                sh 'git config user.name "DevOps Gaivota"'
+                sh """
+                    mkdir gaivota-manifest-${MANIFEST_NAME}
+                """
+                dir ("gaivota-manifest-${MANIFEST_NAME}") {
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "origin/main"]],
+                        doGenerateSubmoduleConfigurations: false,
+                        submoduleCfg: [],
+                        userRemoteConfigs: [[
+                            credentialsId: 'gaivota-devops',
+                            url: "https://github.com/gaivota-ai/gaivota-manifest-${MANIFEST_NAME}.git"
+                        ]]
+                    ])
+                    sh """
+                        ( git checkout $env.BRANCH_NAME && GIT_BRANCH=$env.BRANCH_NAME ) \
+                        || ( git checkout $env.ENV_NAME && GIT_BRANCH=$env.ENV_NAME ) \
+                        || ( git checkout main && GIT_BRANCH=main )
+                        echo "Patch deployment file..."
+                        kubectl patch --local -f ./overlays/$ENV_NAME/configuration.yaml --type json -p='[{"op" : "replace" , "path": "/data/VERSION", "value": "$BRANCH"},{"op" : "replace" , "path": "/data/ENV", "value": "$ENV_NAME"}]' -o yaml > ./overlays/$ENV_NAME/temp-configuration.yaml
+                        mv ./overlays/$ENV_NAME/temp-configuration.yaml  ./overlays/$ENV_NAME/configuration.yaml
+                    """
+                    sh """
+                        git add overlays/$ENV_NAME/configuration.yaml
+                        git commit --allow-empty -m 'chore: Update overlay/${ENV_NAME} with branch: ${BRANCH}, build: ${BUILD_ID}'
+                    """
+                    withCredentials([usernamePassword(credentialsId: 'gaivota-devops', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+                        sh "git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/gaivota-ai/gaivota-manifest-${MANIFEST_NAME}.git"
+                    }
+                    withCredentials([string(credentialsId: "argocd-jenkins", variable: 'ARGOCD_AUTH_TOKEN'),
+                     string(credentialsId: 'e8c585b2-c418-4fd9-8bf2-ddc70d06ca76', variable: 'GIT_TOKEN')]) {
+                        sh """
+                            curl -sSL -o /usr/local/bin/argocd https://argocd.gaivota.ai/download/argocd-linux-amd64
+                            chmod 755 /usr/local/bin/argocd
+                            argocd --server argocd.gaivota.ai --auth-token $ARGOCD_AUTH_TOKEN --grpc-web repo add https://github.com/gaivota-ai/gaivota-manifest-${MANIFEST_NAME}.git --name gaivota-${MANIFEST_NAME} --username placeholder --password $GIT_TOKEN --upsert
+                            argocd --server argocd.gaivota.ai --auth-token $ARGOCD_AUTH_TOKEN --grpc-web app get $APP_NAME-$ENV_NAME \
+                            || argocd --server argocd.gaivota.ai --auth-token $ARGOCD_AUTH_TOKEN --grpc-web app create $APP_NAME-$ENV_NAME \
+                                    --revision main \
+                                    --path overlays/$ENV_NAME \
+                                    --dest-server $K_CLUSTER \
+                                    --project crawler-$ENV_NAME \
+                                    --dest-namespace crawler-$ENV_NAME \
+                                    --repo https://github.com/gaivota-ai/gaivota-manifest-${MANIFEST_NAME}.git
+                            argocd --server argocd.gaivota.ai --auth-token $ARGOCD_AUTH_TOKEN --grpc-web app sync $APP_NAME-$ENV_NAME --force --timeout 600
+                        """
+                    }
+                }
+            }
+            post {
+                always {
+                    slackSend color: "warning", message: "Job: #${env.BUILD_NUMBER} - $APP_NAME - ${env.BRANCH_NAME} - Generate Manifest"
+                }
+            }
+        }
+    }
+    post {
+        success {
+            slackSend color: "good", message: "Job: #${env.BUILD_NUMBER} - $APP_NAME - ${env.BRANCH_NAME}  was successful"
+        }
+        failure {
+            slackSend color: "danger", message: "Job: #${env.BUILD_NUMBER} - $APP_NAME - ${env.BRANCH_NAME} was failed"
+        }
+        aborted {
+            slackSend color: "#333333", message: "Job: #${env.BUILD_NUMBER} - $APP_NAME - ${env.BRANCH_NAME} was aborted"
+        }
+    }
+}

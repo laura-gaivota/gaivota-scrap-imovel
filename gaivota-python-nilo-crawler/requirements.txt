@@ -1,0 +1,4 @@
+--index-url https://pypicloud.gaivota.ai/simple/
+boto3==1.12.32
+black==22.6.0
+pyOpenSSL==22.0.0
